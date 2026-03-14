@@ -1,5 +1,6 @@
 data/
 output/
 checkpoints/
-tensorboard/
-ckpts/
+tensorboard*/
+ckpts*/
+subs/

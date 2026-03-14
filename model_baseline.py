@@ -7,13 +7,13 @@ import importlib
 
 
 class SimpleRiskCNN(nn.Module):
-    """A minimal fully convolutional baseline for dense risk prediction logits."""
+    """Simple RGBD CNN baseline for per-pixel risk-class logits."""
 
     def __init__(
         self,
         in_channels: int = 4,
-        hidden_channels: tuple[int, ...] = (32, 64, 128, 256, 64, 32),
-        out_channels: int = 1,
+        hidden_channels: tuple[int, ...] = (32, 64, 64),
+        out_channels: int = 5,
     ) -> None:
         super().__init__()
 
@@ -33,6 +33,22 @@ class SimpleRiskCNN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.network(x)
+
+
+class SimpleRiskLinear(nn.Module):
+    """
+    Per-pixel linear baseline over RGBD channels.
+
+    This is a 1x1 convolution that acts like an independent linear classifier
+    on each pixel's input feature vector.
+    """
+
+    def __init__(self, in_channels: int = 4, out_channels: int = 5) -> None:
+        super().__init__()
+        self.classifier = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.classifier(x)
 
 
 class SegFormerRisk(nn.Module):

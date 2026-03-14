@@ -23,7 +23,6 @@ from dataloader import (
 )
 from model import SegFormerRisk, SimpleRiskCNN
 from train import (
-    ARCHITECTURE as TRAIN_ARCHITECTURE,
     COMPONENT_CONNECTIVITY as TRAIN_COMPONENT_CONNECTIVITY,
     DEPTH_MAX as TRAIN_DEPTH_MAX,
     DEPTH_MIN as TRAIN_DEPTH_MIN,
@@ -34,8 +33,8 @@ from train import (
     TARGET_MODE as TRAIN_TARGET_MODE,
 )
 
-
-CHECKPOINT_PATH = Path("ckpts_classification/simple_cnn_baseline/simple_cnn_epoch_008.pt")
+TRAIN_ARCHITECTURE = "segformer"
+CHECKPOINT_PATH = Path("ckpts_classification/ours_segformer_transfer_ce_bins5_ori_weights/segformer_transfer_epoch_029.pt")
 VALIDATION_DATASET_ROOT = Path("data/cityscape_prepro/train")
 DEFAULT_VAL_SPLIT = 0.2
 DEFAULT_RANDOM_SEED = 42

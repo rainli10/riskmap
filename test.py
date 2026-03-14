@@ -9,23 +9,27 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from dataloader import quantize_risk_map
+from train_ours import BEST_CHECKPOINT_PATH as OURS_CHECKPOINT_PATH
 from validation import (
-    CHECKPOINT_PATH as DEFAULT_CHECKPOINT_PATH,
     build_target_risk_map,
+    convert_risk_map_for_task,
     create_output_directories,
     get_device,
     load_model_from_checkpoint,
+    predictions_to_risk_tensor,
     save_sample_outputs,
 )
 
 
-CHECKPOINT_PATH = DEFAULT_CHECKPOINT_PATH
+# Use the train_ours (SegFormer transfer) model checkpoint.
+CHECKPOINT_PATH = OURS_CHECKPOINT_PATH
 TEST_IMAGE_PATH = Path("data/cityscape_prepro/val/image_png/0.png")
 TEST_DEPTH_PATH = Path("data/cityscape_prepro/val/depth/0.npy")
 # Set this to None if no label file is available for the test image.
 TEST_LABEL_PATH: Path | None = Path("data/cityscape_prepro/val/label/0.npy")
 MODEL_INPUT_SIZE = (256, 128)  # (width, height)
-OUTPUT_ROOT = Path("output/test")
+OUTPUT_ROOT = Path("output/test_ours")
 
 
 def resize_map(
@@ -95,12 +99,22 @@ def load_optional_label(label_path: Path | None, image_size: tuple[int, int]) ->
 def resize_prediction_back(
     prediction: np.ndarray,
     original_size: tuple[int, int],
+    mode: str = "bilinear",
 ) -> np.ndarray:
     prediction_size = (prediction.shape[1], prediction.shape[0])
     if prediction_size == original_size:
         return prediction.astype(np.float32)
 
-    return resize_map(prediction.astype(np.float32), size=original_size, mode="bilinear")
+    return resize_map(prediction.astype(np.float32), size=original_size, mode=mode)
+
+
+def resize_class_map_back(class_map: np.ndarray, original_size: tuple[int, int]) -> np.ndarray:
+    """Resize integer class map to original size with nearest neighbor."""
+    if (class_map.shape[1], class_map.shape[0]) == original_size:
+        return class_map.astype(np.int64)
+    tensor = torch.from_numpy(class_map.astype(np.float32))[None, None, ...]
+    resized = F.interpolate(tensor, size=(original_size[1], original_size[0]), mode="nearest")
+    return resized[0, 0].cpu().numpy().astype(np.int64)
 
 
 def write_test_summary(
@@ -143,31 +157,51 @@ def main() -> None:
     label_array = load_optional_label(TEST_LABEL_PATH, image_size=original_size)
 
     with torch.no_grad():
-        prediction = model(input_tensor.unsqueeze(0).to(device))
+        raw_prediction = model(input_tensor.unsqueeze(0).to(device))
+        prediction = predictions_to_risk_tensor(raw_prediction, runtime_config)
 
     predicted_risk = prediction[0, 0].detach().cpu().numpy()
     predicted_risk = resize_prediction_back(predicted_risk, original_size=original_size)
 
+    predicted_class_map = None
     target_risk = None
+    target_class_map = None
     mse_value = None
     l1_value = None
 
+    if runtime_config.get("task_mode") == "risk_classification":
+        pred_classes = torch.argmax(raw_prediction, dim=1)[0].detach().cpu().numpy()
+        predicted_class_map = resize_class_map_back(pred_classes, original_size=original_size)
+
     if label_array is not None:
-        target_risk = build_target_risk_map(
+        continuous_target_risk = build_target_risk_map(
             label_map=label_array,
             depth_map=original_depth,
             runtime_config=runtime_config,
         )
-        mse_value = float(np.mean((predicted_risk - target_risk) ** 2))
-        l1_value = float(np.mean(np.abs(predicted_risk - target_risk)))
+        target_risk = convert_risk_map_for_task(continuous_target_risk, runtime_config)
+        if runtime_config.get("task_mode") == "risk_classification":
+            risk_scale = float(runtime_config.get("risk_scale", 1.0))
+            scaled = np.clip(continuous_target_risk.astype(np.float32) * risk_scale, 0.0, 1.0)
+            target_class_map = quantize_risk_map(
+                scaled,
+                bin_edges=runtime_config.get("risk_bin_edges", (0.2, 0.4, 0.6, 0.8)),
+            )
+        if target_risk is not None:
+            mse_value = float(np.mean((predicted_risk - target_risk) ** 2))
+            l1_value = float(np.mean(np.abs(predicted_risk - target_risk)))
 
     sample_id = TEST_IMAGE_PATH.stem
     save_sample_outputs(
         sample_id=sample_id,
         rgb_image=original_rgb,
         predicted_risk=predicted_risk,
+        predicted_class_map=predicted_class_map,
         target_risk=target_risk,
+        target_class_map=target_class_map,
         output_dirs=output_dirs,
+        pred_value_max=1.0,
+        target_value_max=1.0,
     )
 
     write_test_summary(

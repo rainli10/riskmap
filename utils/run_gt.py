@@ -102,8 +102,12 @@ def create_output_directories(output_root: Path) -> dict[str, Path]:
     return directories
 
 
-def save_risk_visualization(risk_map: np.ndarray, output_path: Path) -> None:
-    Image.fromarray(render_continuous_risk_map(risk_map)).save(output_path)
+def save_risk_visualization(
+    risk_map: np.ndarray,
+    output_path: Path,
+    value_max: float = 1.0,
+) -> None:
+    Image.fromarray(render_continuous_risk_map(risk_map, value_max=value_max)).save(output_path)
 
 
 def build_scalar_legend_image(
@@ -316,6 +320,7 @@ def save_depth_comparison_visualization(
     depth_map: np.ndarray,
     risk_map: np.ndarray,
     output_path: Path,
+    value_max: float = 1.0,
 ) -> None:
     valid_depth_mask = np.asarray(depth_map, dtype=np.float32) > 0
     depth_weight_map = compute_depth_weight(
@@ -337,7 +342,10 @@ def save_depth_comparison_visualization(
             valid_mask=valid_depth_mask,
         ),
     )
-    risk_panel = add_panel_title("Risk", render_continuous_risk_map(risk_map))
+    risk_panel = add_panel_title(
+        "Risk",
+        render_continuous_risk_map(risk_map, value_max=value_max),
+    )
     grid = make_panel_grid(
         sample_id=sample_id,
         panel_rows=[
@@ -383,7 +391,9 @@ def process_sample(
     )
 
     np.save(output_dirs["risk_npy"] / f"{sample_id}.npy", risk_map.astype(np.float32))
-    save_risk_visualization(risk_map, output_dirs["risk_png"] / f"{sample_id}.png")
+    save_risk_visualization(
+        risk_map, output_dirs["risk_png"] / f"{sample_id}.png", value_max=1.0
+    )
     save_depth_comparison_visualization(
         sample_id=sample_id,
         rgb_image=rgb_image,
@@ -391,9 +401,10 @@ def process_sample(
         depth_map=depth_map,
         risk_map=risk_map,
         output_path=output_dirs["depth_com_risk"] / f"{sample_id}.png",
+        value_max=1.0,
     )
 
-    overlay = overlay_risk_on_rgb(rgb_image, risk_map)
+    overlay = overlay_risk_on_rgb(rgb_image, risk_map, value_max=1.0)
     Image.fromarray(overlay).save(output_dirs["overlay_png"] / f"{sample_id}.png")
 
     comparison = make_comparison_panel(
@@ -401,6 +412,7 @@ def process_sample(
         rgb_image=rgb_image,
         predicted_risk=risk_map,
         target_risk=None,
+        pred_value_max=1.0,
     )
     comparison.save(output_dirs["comparison_png"] / f"{sample_id}.png")
 

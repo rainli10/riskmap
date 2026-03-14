@@ -371,6 +371,8 @@ class RiskMapDataset(Dataset):
         depth_max: float,
         target_mode: str = "blocked",
         component_connectivity: int = 8,
+        include_label_in_input: bool = False,
+        label_max_id: int = 33,
         image_folder: str = "image_png",
         label_folder: str = "label",
         depth_folder: str = "depth",
@@ -384,6 +386,8 @@ class RiskMapDataset(Dataset):
         self.depth_max = float(depth_max)
         self.target_mode = target_mode
         self.component_connectivity = int(component_connectivity)
+        self.include_label_in_input = bool(include_label_in_input)
+        self.label_max_id = int(label_max_id)
 
         if self.target_mode not in {"dense", "blocked"}:
             raise ValueError(f"Unsupported target_mode '{self.target_mode}'. Use 'dense' or 'blocked'.")
@@ -477,6 +481,14 @@ class RiskMapDataset(Dataset):
         risk_tensor = torch.from_numpy(risk_map[None, ...]).float()
 
         input_tensor = torch.cat((image_tensor, depth_tensor), dim=0)
+        if self.include_label_in_input:
+            label_input = np.clip(
+                label_array.astype(np.float32) / max(float(self.label_max_id), 1.0),
+                0.0,
+                1.0,
+            )
+            label_tensor = torch.from_numpy(label_input[None, ...]).float()
+            input_tensor = torch.cat((input_tensor, label_tensor), dim=0)
 
         return {
             "input": input_tensor,

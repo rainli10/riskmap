@@ -4,33 +4,45 @@ from pathlib import Path
 
 import torch
 from torch import nn
-from torch.optim import Adam
+from torch.nn import functional as F
+from torch.optim import Adam, AdamW
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader, random_split
 
 from dataloader import RiskMapDataset, compute_depth_weight_value
-from model import SimpleRiskCNN
+from model import SegFormerRisk, SimpleRiskCNN
 
 
 DATASET_ROOT = Path("data/cityscape_prepro/train")
-NICKNAME = "64_BATCH_200_EPOCHS"
+NICKNAME = "baseline_cnn_or_segformer_head_only"
 CHECKPOINT_DIR = Path("ckpts") / NICKNAME
-BEST_CHECKPOINT_PATH = CHECKPOINT_DIR / "baseline_cnn_best.pt"
 
-BATCH_SIZE = 64
+BATCH_SIZE = 64# 64
 NUM_EPOCHS = 200
 LEARNING_RATE = 1e-3
+SEGFORMER_LEARNING_RATE = 1e-4
+SEGFORMER_WEIGHT_DECAY = 0.01
 VAL_SPLIT = 0.2
 NUM_WORKERS = 0
 RANDOM_SEED = 42
 TARGET_MODE = "blocked"
 COMPONENT_CONNECTIVITY = 4
 
+# Options: "simplest_cnn", "segformer"
 ARCHITECTURE = "simplest_cnn"
-LOG_EVERY_N_BATCHES = 10
+BEST_CHECKPOINT_PATH = CHECKPOINT_DIR / f"{ARCHITECTURE}_best.pt"
+LOG_EVERY_N_BATCHES = 3
 TENSORBOARD_LOG_DIR = Path("tensorboard") / NICKNAME / ARCHITECTURE
+SEGFORMER_PRETRAINED_MODEL = "nvidia/segformer-b0-finetuned-ade-512-512"
+SEGFORMER_FREEZE_BACKBONE = True
+SEGFORMER_ADAPTER_HIDDEN: int | None = None
+POSITIVE_RISK_THRESHOLD = 1e-4
+POSITIVE_PIXEL_WEIGHT = 10
+LOSS_NAME = "weighted_bce"  # Options: "weighted_bce", "weighted_mse", "weighted_l1", "boundary_aware"
+DICE_LOSS_WEIGHT = 0.1
+EDGE_LOSS_WEIGHT = 0.05
 
-# Keep these weights in [0, 1] so they match the model's sigmoid output range.
+# Keep these weights in [0, 1] so they match bounded risk targets.
 SEMANTIC_WEIGHTS = {
     -1: 0.0,   # unlabeled / ignore
     0: 0.0,    # road
@@ -56,7 +68,169 @@ SEMANTIC_WEIGHTS = {
 
 # Edit these values if your depth representation uses a different scale.
 DEPTH_MIN = 1.0
-DEPTH_MAX = 200.0
+DEPTH_MAX = 100.0
+
+
+class WeightedMSELoss(nn.Module):
+    """Pixel-weighted MSE to emphasize sparse non-zero risk targets."""
+
+    def __init__(self, positive_weight: float = 10.0, threshold: float = 1e-4) -> None:
+        super().__init__()
+        self.positive_weight = float(positive_weight)
+        self.threshold = float(threshold)
+
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        weight_map = torch.ones_like(targets)
+        weight_map = torch.where(
+            targets > self.threshold,
+            torch.full_like(targets, self.positive_weight),
+            weight_map,
+        )
+        loss_map = (predictions - targets) ** 2
+        return (weight_map * loss_map).mean()
+
+
+class WeightedBCEWithLogitsLoss(nn.Module):
+    """Pixel-weighted BCEWithLogits for segformer output logits."""
+
+    def __init__(self, positive_weight: float = 10.0, threshold: float = 1e-4) -> None:
+        super().__init__()
+        self.positive_weight = float(positive_weight)
+        self.threshold = float(threshold)
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        weight_map = torch.ones_like(targets)
+        weight_map = torch.where(
+            targets > self.threshold,
+            torch.full_like(targets, self.positive_weight),
+            weight_map,
+        )
+        loss_map = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        return (weight_map * loss_map).mean()
+
+
+class WeightedL1Loss(nn.Module):
+    """Pixel-weighted L1 for sparse non-zero risk targets."""
+
+    def __init__(
+        self,
+        positive_weight: float = 10.0,
+        threshold: float = 1e-4,
+        from_logits: bool = True,
+    ) -> None:
+        super().__init__()
+        self.positive_weight = float(positive_weight)
+        self.threshold = float(threshold)
+        self.from_logits = bool(from_logits)
+
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(predictions) if self.from_logits else predictions
+        weight_map = torch.ones_like(targets)
+        weight_map = torch.where(
+            targets > self.threshold,
+            torch.full_like(targets, self.positive_weight),
+            weight_map,
+        )
+        loss_map = torch.abs(probs - targets)
+        return (weight_map * loss_map).mean()
+
+
+class BoundaryAwareLoss(nn.Module):
+    """Weighted BCE + Dice + Sobel-edge L1 for sharper boundaries."""
+
+    def __init__(
+        self,
+        positive_weight: float = 10.0,
+        threshold: float = 1e-4,
+        dice_weight: float = 0.5,
+        edge_weight: float = 0.2,
+        smooth: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.positive_weight = float(positive_weight)
+        self.threshold = float(threshold)
+        self.dice_weight = float(dice_weight)
+        self.edge_weight = float(edge_weight)
+        self.smooth = float(smooth)
+
+        sobel_x = torch.tensor(
+            [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]], dtype=torch.float32
+        ).view(1, 1, 3, 3)
+        sobel_y = torch.tensor(
+            [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]], dtype=torch.float32
+        ).view(1, 1, 3, 3)
+        self.register_buffer("sobel_x", sobel_x)
+        self.register_buffer("sobel_y", sobel_y)
+
+    def _dice_loss(self, probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        intersection = (probs * targets).sum(dim=(1, 2, 3))
+        denominator = probs.sum(dim=(1, 2, 3)) + targets.sum(dim=(1, 2, 3))
+        dice = (2.0 * intersection + self.smooth) / (denominator + self.smooth)
+        return 1.0 - dice.mean()
+
+    def _edge_map(self, values: torch.Tensor) -> torch.Tensor:
+        grad_x = F.conv2d(values, self.sobel_x, padding=1)
+        grad_y = F.conv2d(values, self.sobel_y, padding=1)
+        return torch.sqrt(grad_x * grad_x + grad_y * grad_y + 1e-6)
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        weight_map = torch.ones_like(targets)
+        weight_map = torch.where(
+            targets > self.threshold,
+            torch.full_like(targets, self.positive_weight),
+            weight_map,
+        )
+
+        bce_map = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        bce_loss = (weight_map * bce_map).mean()
+
+        probs = torch.sigmoid(logits)
+        dice_loss = self._dice_loss(probs, targets)
+
+        pred_edge = self._edge_map(probs)
+        target_edge = self._edge_map(targets)
+        edge_loss = F.l1_loss(pred_edge, target_edge)
+
+        return bce_loss + self.dice_weight * dice_loss + self.edge_weight * edge_loss
+
+
+def build_loss() -> nn.Module:
+    if LOSS_NAME == "weighted_bce":
+        return WeightedBCEWithLogitsLoss(
+            positive_weight=POSITIVE_PIXEL_WEIGHT,
+            threshold=POSITIVE_RISK_THRESHOLD,
+        )
+    if LOSS_NAME == "weighted_mse":
+        return WeightedMSELoss(
+            positive_weight=POSITIVE_PIXEL_WEIGHT,
+            threshold=POSITIVE_RISK_THRESHOLD,
+        )
+    if LOSS_NAME == "weighted_l1":
+        return WeightedL1Loss(
+            positive_weight=POSITIVE_PIXEL_WEIGHT,
+            threshold=POSITIVE_RISK_THRESHOLD,
+            from_logits=True,
+        )
+    if LOSS_NAME == "boundary_aware":
+        return BoundaryAwareLoss(
+            positive_weight=POSITIVE_PIXEL_WEIGHT,
+            threshold=POSITIVE_RISK_THRESHOLD,
+            dice_weight=DICE_LOSS_WEIGHT,
+            edge_weight=EDGE_LOSS_WEIGHT,
+        )
+    raise ValueError(
+        "Unknown LOSS_NAME "
+        f"'{LOSS_NAME}'. Use 'weighted_bce', 'weighted_mse', 'weighted_l1', or 'boundary_aware'."
+    )
+
+
+def set_backbone_trainable(model: SegFormerRisk, trainable: bool) -> None:
+    for parameter in model.backbone.segformer.parameters():
+        parameter.requires_grad = trainable
+
+
+def count_trainable_parameters(model: nn.Module) -> int:
+    return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
 
 
 def debug_depth(depth_values: list[float] | None = None) -> list[dict[str, float | None]]:
@@ -185,7 +359,7 @@ def run_epoch(
 
 def save_checkpoint(
     model: nn.Module,
-    optimizer: Adam,
+    optimizer: Adam | AdamW,
     epoch: int,
     val_loss: float,
     checkpoint_path: Path,
@@ -197,11 +371,20 @@ def save_checkpoint(
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "val_loss": val_loss,
+            "architecture": ARCHITECTURE,
             "semantic_weights": SEMANTIC_WEIGHTS,
             "depth_min": DEPTH_MIN,
             "depth_max": DEPTH_MAX,
             "target_mode": TARGET_MODE,
             "component_connectivity": COMPONENT_CONNECTIVITY,
+            "segformer_pretrained_model": SEGFORMER_PRETRAINED_MODEL,
+            "segformer_freeze_backbone": SEGFORMER_FREEZE_BACKBONE,
+            "segformer_adapter_hidden": SEGFORMER_ADAPTER_HIDDEN,
+            "positive_risk_threshold": POSITIVE_RISK_THRESHOLD,
+            "positive_pixel_weight": POSITIVE_PIXEL_WEIGHT,
+            "loss_name": LOSS_NAME,
+            "dice_loss_weight": DICE_LOSS_WEIGHT,
+            "edge_loss_weight": EDGE_LOSS_WEIGHT,
         },
         checkpoint_path,
     )
@@ -224,10 +407,28 @@ def main() -> None:
 
     if ARCHITECTURE == "simplest_cnn":
         model = SimpleRiskCNN().to(device)
-        criterion = nn.MSELoss()
+        criterion = build_loss().to(device)
         optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
+    elif ARCHITECTURE == "segformer":
+        model = SegFormerRisk(
+            in_channels=4,
+            pretrained_model_name=SEGFORMER_PRETRAINED_MODEL,
+            freeze_backbone=SEGFORMER_FREEZE_BACKBONE,
+            adapter_hidden=SEGFORMER_ADAPTER_HIDDEN,
+        ).to(device)
+        # Head-only transfer learning: keep pretrained encoder fixed.
+        if SEGFORMER_FREEZE_BACKBONE:
+            set_backbone_trainable(model, trainable=False)
+        criterion = build_loss().to(device)
+        optimizer = AdamW(
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            lr=SEGFORMER_LEARNING_RATE,
+            weight_decay=SEGFORMER_WEIGHT_DECAY,
+        )
     else:
         raise ValueError(f"Unknown architecture: {ARCHITECTURE}")
+
+    print(f"Trainable parameters: {count_trainable_parameters(model):,}")
 
     TENSORBOARD_LOG_DIR.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(TENSORBOARD_LOG_DIR))
@@ -238,12 +439,23 @@ def main() -> None:
                 f"architecture: {ARCHITECTURE}",
                 f"batch_size: {BATCH_SIZE}",
                 f"learning_rate: {LEARNING_RATE}",
+                f"segformer_learning_rate: {SEGFORMER_LEARNING_RATE}",
+                f"segformer_weight_decay: {SEGFORMER_WEIGHT_DECAY}",
                 f"num_epochs: {NUM_EPOCHS}",
                 f"log_every_n_batches: {LOG_EVERY_N_BATCHES}",
                 f"target_mode: {TARGET_MODE}",
                 f"component_connectivity: {COMPONENT_CONNECTIVITY}",
                 f"depth_min: {DEPTH_MIN}",
                 f"depth_max: {DEPTH_MAX}",
+                f"segformer_pretrained_model: {SEGFORMER_PRETRAINED_MODEL}",
+                f"segformer_freeze_backbone: {SEGFORMER_FREEZE_BACKBONE}",
+                f"segformer_adapter_hidden: {SEGFORMER_ADAPTER_HIDDEN}",
+                f"positive_risk_threshold: {POSITIVE_RISK_THRESHOLD}",
+                f"positive_pixel_weight: {POSITIVE_PIXEL_WEIGHT}",
+                f"loss_name: {LOSS_NAME}",
+                f"dice_loss_weight: {DICE_LOSS_WEIGHT}",
+                f"edge_loss_weight: {EDGE_LOSS_WEIGHT}",
+                f"trainable_parameters: {count_trainable_parameters(model)}",
             ]
         ),
     )
@@ -283,7 +495,7 @@ def main() -> None:
                 f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f}"
             )
 
-            epoch_checkpoint_path = CHECKPOINT_DIR / f"baseline_cnn_epoch_{epoch:03d}.pt"
+            epoch_checkpoint_path = CHECKPOINT_DIR / f"{ARCHITECTURE}_epoch_{epoch:03d}.pt"
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,
