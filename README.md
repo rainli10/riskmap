@@ -15,7 +15,7 @@ Dense **5-class per-pixel risk maps** from **RGB-D** input for autonomous drivin
 
 ## Pipeline
 
-End-to-end view of data and model flow (RGB, depth, semantics → risk supervision → SegFormer-style prediction).
+End-to-end view of data and model flow (RGB, depth → risk supervision → SegFormer-style prediction).
 
 ![RiskDrive pipeline](pipeline.png)
 
