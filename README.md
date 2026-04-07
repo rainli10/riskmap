@@ -3,7 +3,7 @@
 Dense **5-class per-pixel risk maps** from **RGB-D** input for autonomous driving. Higher risk indicates regions that are more critical for ego-vehicle safety (e.g. nearby pedestrians and vehicles). The main model is a **depth-aware SegFormer** (RiskDrive); a lightweight **CNN baseline** is included for comparison.
 
 **Course:** APS360 – Applied Fundamentals of Deep Learning (University of Toronto)  
-**Author:** Runhao Li · [rainli@mail.utoronto.ca](mailto:rainli@mail.utoronto.ca) · [github.com/rainli10/riskmap](https://github.com/rainli10/riskmap)
+**Author:** Runhao Li · [rainli@mail.utoronto.ca](mailto:rain.li@mail.utoronto.ca) · [github.com/rainli10/riskmap](https://github.com/rainli10/riskmap)
 
 ---
 
