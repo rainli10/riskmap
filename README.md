@@ -21,21 +21,31 @@ End-to-end view of data and model flow (RGB, depth, semantics → risk supervisi
 
 ---
 
-## Method (summary)
+## Method
 
-- **Supervision:** Cityscapes RGB + semantic maps + monocular depth (e.g. from a foundation depth model). Per-pixel risk combines a class risk weight \(w_c\) with a normalized proximity term from depth \(g(D)\):
+- **Supervision:** Cityscapes RGB + semantic maps + monocular depth (e.g. from a foundation depth model). Per-pixel risk combines a class risk weight **w_c** with a normalized proximity term from depth **g(D)**:
 
-\[
-g(D)=\mathrm{clip}\left(\frac{1/D - 1/D_{\max}}{1/D_{\min}-1/D_{\max}},\,0,\,1\right), \qquad
-R(x,y)= w_{c(x,y)} \cdot g(D(x,y)).
-\]
+$$
+g(D) = \mathrm{clip}\left( \frac{1/D - 1/D_{\max}}{1/D_{\min} - 1/D_{\max}}, 0, 1 \right)
+$$
+
+$$
+R(x,y) = w_{c(x,y)} \cdot g\left(D(x,y)\right)
+$$
+
+Plain-text form (any Markdown viewer):
+
+```
+g(D) = clip( (1/D - 1/D_max) / (1/D_min - 1/D_max), 0, 1 )
+R(x,y) = w[c(x,y)] * g(D(x,y))
+```
 
 - **Model:** SegFormer backbone on RGB, with depth processed through a shallow conv pyramid and **gated fusion** into the transformer stages, then the standard MLP decoder for dense **5-way** risk classification.
 - **Training:** Staged fine-tuning (frozen backbone → full model), AdamW, cosine schedule, AMP on CUDA (see `train_ours.py`).
 
 ---
 
-## Generalization (real-world driving)
+## Real-world driving testing
 
 Qualitative result on self-collected **Don Valley Parkway (Toronto)** footage (no GT semantics; illustration only).
 
