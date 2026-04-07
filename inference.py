@@ -35,9 +35,9 @@ from validation_ours import (
 # Checkpoint bundled with ``validation_ours`` defaults; change OURS_CHECKPOINT_PATH import if needed.
 CHECKPOINT_PATH = OURS_CHECKPOINT_PATH
 # Root with image_png/*.png, depth/<id>.npy, label/<id>.npy — same layout as training/validation.
-SAMPLE_DATASET_ROOT = Path("output/prepared_from_test")
+SAMPLE_DATASET_ROOT = Path("/home/rain/Desktop/workspace/APS360/riskmap/output/prepared_from_real/2")
 # PNG stem to run; must exist under SAMPLE_DATASET_ROOT. Use None to run every sample in the folder.
-SAMPLE_ID_STEM: str | None = "0000006838"
+SAMPLE_ID_STEM: str | None = "dvp2"
 OUTPUT_ROOT = Path("output/test_ours")
 BATCH_SIZE = 1
 NUM_WORKERS = 0

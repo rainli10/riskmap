@@ -279,16 +279,10 @@ def build_dense_risk_map(
     depth_weight = compute_depth_weight(depth_map, depth_min=depth_min, depth_max=depth_max)
 
     unique_labels = {int(class_id) for class_id in np.unique(label_ids)}
-    missing_weights = sorted(unique_labels.difference(semantic_weights))
-    if missing_weights:
-        raise KeyError(
-            "Missing semantic weights for class ids: "
-            f"{missing_weights}. Update your SEMANTIC_WEIGHTS config."
-        )
 
     semantic_weight_map = np.zeros_like(depth_weight, dtype=np.float32)
     for class_id in unique_labels:
-        semantic_weight_map[label_ids == class_id] = float(semantic_weights[class_id])
+        semantic_weight_map[label_ids == class_id] = float(semantic_weights.get(class_id, 0.0))
 
     risk_map = semantic_weight_map * depth_weight
 
@@ -309,12 +303,6 @@ def build_blocked_risk_map(
     depth = _prepare_depth_map(depth_map)
 
     unique_labels = {int(class_id) for class_id in np.unique(label_ids)}
-    missing_weights = sorted(unique_labels.difference(semantic_weights))
-    if missing_weights:
-        raise KeyError(
-            "Missing semantic weights for class ids: "
-            f"{missing_weights}. Update your SEMANTIC_WEIGHTS config."
-        )
 
     blocked_risk_map = np.zeros_like(depth, dtype=np.float32)
     valid_depth_mask = depth > eps
@@ -332,7 +320,8 @@ def build_blocked_risk_map(
                 object_risk = 0.0
             else:
                 min_depth = float(valid_object_depths.min())
-                object_risk = float(semantic_weights[class_id]) * compute_depth_weight_value(
+                w = float(semantic_weights.get(class_id, 0.0))
+                object_risk = w * compute_depth_weight_value(
                     depth_value=min_depth,
                     depth_min=depth_min,
                     depth_max=depth_max,
